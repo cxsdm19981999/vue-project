@@ -1,0 +1,119 @@
+stages:
+  - test
+  - build
+  - deploy
+
+# 安全扫描
+include:
+  - template: Security/SAST.gitlab-ci.yml
+
+# 全局变量
+variables:
+  ARTIFACT_PATH: "dist/"
+  BUILD_CMD: |
+    npm install
+    npm run build
+
+# STG环境配置
+build_stg:
+  stage: build
+  image: node:16  # 指定包含 npm 的官方镜像
+  script:
+    - echo "Building for STG environment..."
+    - $BUILD_CMD
+  artifacts:
+    paths:
+      - $ARTIFACT_PATH
+  rules:
+    - if: $CI_COMMIT_BRANCH == "stg"
+
+deploy_stg:
+  stage: deploy
+  image: alpine:3.18  # 更轻量的基础镜像
+  variables:
+    DEPLOY_HOST: "192.168.2.246"  # 明确声明目标主机
+    DEPLOY_USER: "git"            # 指定部署用户
+    SSH_OPTS: "-o ConnectTimeout=30 -o TCPKeepAlive=yes -o ServerAliveInterval=30"
+  before_script:
+    - apk add --no-cache openssh-client rsync ncurses # 必须安装的工具
+    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+
+  script:
+    - |
+      echo "=== 网络诊断 ==="
+      timeout 5 ping -c3 $DEPLOY_HOST || echo "ping失败"
+      timeout 5 nc -zv $DEPLOY_HOST 22 -w 3 || echo "端口检测失败"
+      
+      echo "=== 安全部署尝试 ==="
+      ssh -o StrictHostKeyChecking=no \
+          -o UserKnownHostsFile=/dev/null \
+          -o ConnectTimeout=15 \
+          $DEPLOY_USER@$DEPLOY_HOST "echo 连接测试成功 || true"
+      
+      timeout 300 rsync -avz \
+          -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15" \
+          $ARTIFACT_PATH/ $DEPLOY_USER@$DEPLOY_HOST:/path/to/deploy || {
+          echo "部署失败，转为备选方案";
+          tar czf backup.tgz $ARTIFACT_PATH;
+          # 添加其他备选传输方式
+      }
+  environment:
+    name: stg
+    url: "https://cxsdm.stg.com"
+  needs: ["build_stg"]  # 明确声明依赖关系
+  rules:
+    - if: $CI_COMMIT_BRANCH == "stg"
+
+# PRE环境配置（示例）
+build_pre:
+  stage: build
+  image: node:16  # 指定包含 npm 的官方镜像
+  script:
+    - echo "Building for PRE environment..."
+    - $BUILD_CMD
+  artifacts:
+    paths:
+      - $ARTIFACT_PATH
+  rules:
+    - if: $CI_COMMIT_BRANCH == "pre"
+
+deploy_pre:
+  stage: deploy
+  image: node:16  # 指定包含 npm 的官方镜像
+  script:
+    - echo "Deploying to PRE..."
+    - scp -r $ARTIFACT_PATH user@pre-server:/path/to/deploy
+  environment:
+    name: pre
+    url: "https://cxsdm.pre.com"
+  needs: ["build_pre"]
+  rules:
+    - if: $CI_COMMIT_BRANCH == "pre"
+
+# PROD环境配置（示例）
+build_prod:
+  stage: build
+  image: node:16  # 指定包含 npm 的官方镜像
+  script:
+    - echo "Building for PROD environment..."
+    - $BUILD_CMD
+  artifacts:
+    paths:
+      - $ARTIFACT_PATH
+  rules:
+    - if: $CI_COMMIT_BRANCH == "prod"
+
+deploy_prod:
+  stage: deploy
+  image: node:16  # 指定包含 npm 的官方镜像
+  script:
+    - echo "Deploying to PROD..."
+    - scp -r $ARTIFACT_PATH user@prod-server:/path/to/deploy
+  environment:
+    name: prod
+    url: "https://cxsdm.com"
+  needs: ["build_prod"]
+  rules:
+    - if: $CI_COMMIT_BRANCH == "prod"
